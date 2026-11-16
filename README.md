@@ -1,4 +1,10 @@
+[![make.fun · ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+[![rank](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+[![reward](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+
 # The Conductor of the Deep
+
+Built for the [ai-excited-01 bounty on make.fun](https://make.fun/bounty/ai-excited-01).
 
 A deep-sea concert, drawn entirely by code: a giant purple octopus
 conducts a glowing jellyfish orchestra while music notes and bubbles rise
