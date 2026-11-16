@@ -1,492 +1,575 @@
 #!/usr/bin/env python3
 """The Conductor of the Deep -- ai-excited-01 entry.
 
-A program that draws, from scratch with only the Python standard library,
-one deterministic 1024x1024 PNG: a giant purple octopus conducting a
-glowing jellyfish orchestra in the deep sea, the music itself spiralling
-up out of the water as light.
-
-Everything here is original code written for this entry: a small software
-rasterizer (spans, circles, ellipses, bezier strokes, polygons, a 5x7
-bitmap font) and a PNG encoder built on zlib.
+A deep-sea concert: a giant purple octopus conducts a glowing jellyfish
+orchestra while music notes and bubbles rise through shafts of light.
+Everything is drawn by a small rasterizer written here from scratch
+(framebuffer, shapes, glow) and encoded to PNG with the stdlib zlib.
+Deterministic: same bytes on every run.
 """
 
-import math
 import os
 import struct
 import zlib
 
 W = 1024
 H = 1024
-OUT = "/output/entry.png"
+
+# ---------------------------------------------------------------- framebuffer
+
+fb = bytearray(W * H * 3)
 
 
-def lerp(a, b, t):
-    return int(a + (b - a) * t)
+def _idx(x, y):
+    return (y * W + x) * 3
 
 
-def mix(c1, c2, t):
-    return (lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t))
+def put(x, y, r, g, b):
+    """Set one pixel, clipped."""
+    if 0 <= x < W and 0 <= y < H:
+        i = _idx(x, y)
+        fb[i] = r
+        fb[i + 1] = g
+        fb[i + 2] = b
 
 
-class Canvas:
-    def __init__(self, w, h):
-        self.w = w
-        self.h = h
-        self.buf = bytearray(w * h * 3)
-
-    def span(self, y, x0, x1, col, a=255):
-        """Fill a horizontal run of pixels on row y, blended by alpha a."""
-        if y < 0 or y >= self.h:
+def blend(x, y, r, g, b, a):
+    """Alpha-blend a colour over the pixel (a in 0..1), clipped."""
+    if 0 <= x < W and 0 <= y < H and a > 0.0:
+        if a >= 1.0:
+            put(x, y, r, g, b)
             return
-        if x0 > x1:
-            x0, x1 = x1, x0
-        x0 = max(0, x0)
-        x1 = min(self.w - 1, x1)
-        if x0 > x1:
-            return
-        r, g, b = col
-        base = (y * self.w + x0) * 3
-        if a >= 255:
-            pat = bytes((r, g, b))
-            n = x1 - x0 + 1
-            self.buf[base:base + n * 3] = pat * n
-        elif a > 0:
-            ia = 255 - a
-            buf = self.buf
-            for x in range(x0, x1 + 1):
-                i = (y * self.w + x) * 3
-                buf[i] = (buf[i] * ia + r * a) // 255
-                buf[i + 1] = (buf[i + 1] * ia + g * a) // 255
-                buf[i + 2] = (buf[i + 2] * ia + b * a) // 255
-
-    def dot(self, x, y, col, a=255):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            i = (y * self.w + x) * 3
-            r, g, b = col
-            if a >= 255:
-                self.buf[i] = r
-                self.buf[i + 1] = g
-                self.buf[i + 2] = b
-            elif a > 0:
-                ia = 255 - a
-                self.buf[i] = (self.buf[i] * ia + r * a) // 255
-                self.buf[i + 1] = (self.buf[i + 1] * ia + g * a) // 255
-                self.buf[i + 2] = (self.buf[i + 2] * ia + b * a) // 255
-
-    def circle(self, cx, cy, rad, col, a=255):
-        rad = int(rad)
-        if rad <= 0:
-            return
-        for dy in range(-rad, rad + 1):
-            dx = int(math.sqrt(rad * rad - dy * dy))
-            self.span(cy + dy, cx - dx, cx + dx, col, a)
-
-    def ellipse(self, cx, cy, rx, ry, col, a=255):
-        rx = int(rx)
-        ry = int(ry)
-        if rx <= 0 or ry <= 0:
-            return
-        for dy in range(-ry, ry + 1):
-            t = dy / ry
-            dx = int(rx * math.sqrt(max(0.0, 1.0 - t * t)))
-            self.span(cy + dy, cx - dx, cx + dx, col, a)
-
-    def disc_glow(self, cx, cy, rad, col, peak=90):
-        """Soft glow: layered discs fading outwards."""
-        steps = 5
-        for k in range(steps, 0, -1):
-            r = rad * k // steps
-            self.circle(cx, cy, r, col, peak * (steps - k + 1) // (steps * 2))
-
-    def poly(self, pts, col, a=255):
-        """Scanline fill of a simple polygon given as [(x, y), ...]."""
-        if len(pts) < 3:
-            return
-        ys = [p[1] for p in pts]
-        y0, y1 = max(0, int(min(ys))), min(self.h - 1, int(max(ys)))
-        n = len(pts)
-        for y in range(y0, y1 + 1):
-            xs = []
-            for i in range(n):
-                x1, y1p = pts[i]
-                x2, y2p = pts[(i + 1) % n]
-                if (y1p <= y < y2p) or (y2p <= y < y1p):
-                    t = (y - y1p) / (y2p - y1p)
-                    xs.append(x1 + t * (x2 - x1))
-            xs.sort()
-            for k in range(0, len(xs) - 1, 2):
-                self.span(y, int(xs[k]), int(xs[k + 1]), col, a)
-
-    def bezier(self, p0, p1, p2, width, col, a=255, steps=40):
-        """Thick quadratic bezier stroke, drawn as overlapping discs."""
-        for s in range(steps + 1):
-            t = s / steps
-            mt = 1.0 - t
-            x = mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0]
-            y = mt * mt * p0[1] + 2 * mt * t * p1[1] + t * t * p2[1]
-            w = width[0] + (width[1] - width[0]) * t
-            self.circle(int(x), int(y), max(1, int(w / 2)), col, a)
-
-    def bezier_point(self, p0, p1, p2, t):
-        mt = 1.0 - t
-        return (
-            mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0],
-            mt * mt * p0[1] + 2 * mt * t * p1[1] + t * t * p2[1],
-        )
-
-    def stroke(self, pts, width, col, a=255):
-        """Thick polyline through pts."""
-        for i in range(len(pts) - 1):
-            x1, y1 = pts[i]
-            x2, y2 = pts[i + 1]
-            dist = math.hypot(x2 - x1, y2 - y1)
-            n = max(1, int(dist / max(2.0, width / 3)))
-            for s in range(n + 1):
-                t = s / n
-                self.circle(int(x1 + (x2 - x1) * t), int(y1 + (y2 - y1) * t),
-                            max(1, int(width / 2)), col, a)
+        i = _idx(x, y)
+        ia = 1.0 - a
+        fb[i] = int(fb[i] * ia + r * a)
+        fb[i + 1] = int(fb[i + 1] * ia + g * a)
+        fb[i + 2] = int(fb[i + 2] * ia + b * a)
 
 
-# ---------------------------------------------------------------------------
-# 5x7 bitmap font (glyphs drawn as rows of '#' / '.')
-# ---------------------------------------------------------------------------
-FONT = {
-    "A": [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-    "B": ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
-    "C": [".####", "#....", "#....", "#....", "#....", "#....", ".####"],
-    "D": ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
-    "E": ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
-    "F": ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
-    "G": [".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."],
-    "H": ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-    "I": [".###.", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."],
-    "J": ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
-    "K": ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
-    "L": ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
-    "M": ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
-    "N": ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"],
-    "O": [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
-    "P": ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
-    "Q": [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
-    "R": ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
-    "S": [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
-    "T": ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
-    "U": ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
-    "V": ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
-    "W": ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
-    "X": ["#...#", ".#.#.", "..#..", "..#..", "..#..", ".#.#.", "#...#"],
-    "Y": ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
-    "Z": ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
-    " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
-    "!": ["..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."],
-    ".": [".....", ".....", ".....", ".....", ".....", ".##..", ".##.."],
-    "-": [".....", ".....", ".....", "#####", ".....", ".....", "....."],
-}
-
-CHAR_W = 5
-CHAR_H = 7
+def add(x, y, r, g, b, a):
+    """Additive glow: add a fraction of a colour, clamped, clipped."""
+    if 0 <= x < W and 0 <= y < H and a > 0.0:
+        i = _idx(x, y)
+        v = fb[i] + int(r * a)
+        fb[i] = 255 if v > 255 else v
+        v = fb[i + 1] + int(g * a)
+        fb[i + 1] = 255 if v > 255 else v
+        v = fb[i + 2] + int(b * a)
+        fb[i + 2] = 255 if v > 255 else v
 
 
-def text_width(s, scale, gap=None):
-    if gap is None:
-        gap = scale
-    return len(s) * (CHAR_W * scale + gap) - gap
+def hspan(y, x0, x1, r, g, b):
+    """Solid horizontal span, clipped."""
+    if y < 0 or y >= H:
+        return
+    if x0 < 0:
+        x0 = 0
+    if x1 >= W:
+        x1 = W - 1
+    if x1 < x0:
+        return
+    i = _idx(x0, y)
+    n = x1 - x0 + 1
+    fb[i:i + n * 3] = bytes((r, g, b)) * n
 
 
-def draw_text(cv, s, x, y, scale, col, a=255, gap=None):
-    if gap is None:
-        gap = scale
-    cx = x
-    for ch in s:
-        glyph = FONT.get(ch, FONT[" "])
-        for row in range(CHAR_H):
-            for c in range(CHAR_W):
-                if glyph[row][c] == "#":
-                    for dy in range(scale):
-                        cv.span(y + row * scale + dy, cx + c * scale,
-                                cx + c * scale + scale - 1, col, a)
-        cx += CHAR_W * scale + gap
+def hspan_blend(y, x0, x1, r, g, b, a):
+    """Alpha-blended horizontal span, clipped."""
+    if y < 0 or y >= H or a <= 0.0:
+        return
+    if x0 < 0:
+        x0 = 0
+    if x1 >= W:
+        x1 = W - 1
+    if x1 < x0:
+        return
+    if a >= 1.0:
+        hspan(y, x0, x1, r, g, b)
+        return
+    ia = 1.0 - a
+    for x in range(x0, x1 + 1):
+        i = _idx(x, y)
+        fb[i] = int(fb[i] * ia + r * a)
+        fb[i + 1] = int(fb[i + 1] * ia + g * a)
+        fb[i + 2] = int(fb[i + 2] * ia + b * a)
 
 
-# ---------------------------------------------------------------------------
-# PNG encoder (zlib is stdlib)
-# ---------------------------------------------------------------------------
-def write_png(path, cv):
+# ------------------------------------------------------------- deterministic rng
+
+_seed = 123456789
+
+
+def rnd():
+    """Tiny LCG, fixed seed: same sequence every run."""
+    global _seed
+    _seed = (_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return _seed / 2147483648.0
+
+
+def rr(a, b):
+    return a + (b - a) * rnd()
+
+
+# ---------------------------------------------------------------- PNG encoder
+
+def _chunk(kind, data):
+    out = struct.pack(">I", len(data)) + kind + data
+    out += struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return out
+
+
+def write_png(path):
+    """Encode the framebuffer as a PNG (filter 0 rows, zlib level 9)."""
     raw = bytearray()
-    rowlen = cv.w * 3
-    for y in range(cv.h):
+    row = W * 3
+    for y in range(H):
         raw.append(0)
-        raw += cv.buf[y * rowlen:(y + 1) * rowlen]
-    comp = zlib.compress(bytes(raw), 9)
-
-    def chunk(typ, data):
-        out = struct.pack(">I", len(data)) + typ + data
-        out += struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
-        return out
-
+        raw += fb[y * row:(y + 1) * row]
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
     png = b"\x89PNG\r\n\x1a\n"
-    png += chunk(b"IHDR", struct.pack(">IIBBBBB", cv.w, cv.h, 8, 2, 0, 0, 0))
-    png += chunk(b"IDAT", comp)
-    png += chunk(b"IEND", b"")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    png += _chunk(b"IHDR", ihdr)
+    png += _chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+    png += _chunk(b"IEND", b"")
     with open(path, "wb") as f:
         f.write(png)
+    return len(png)
 
 
-# ---------------------------------------------------------------------------
-# Scene
-# ---------------------------------------------------------------------------
-DEEP_TOP = (10, 18, 58)
-DEEP_MID = (10, 34, 78)
-DEEP_BOT = (3, 20, 34)
-PURPLE_DARK = (74, 32, 122)
-PURPLE = (126, 62, 188)
-PURPLE_LIGHT = (172, 112, 232)
-LAVENDER = (208, 168, 252)
-GOLD = (255, 208, 92)
-GOLD_LIGHT = (255, 238, 170)
-CYAN = (90, 222, 255)
+# ------------------------------------------------------------- shape primitives
+
+def disc(cx, cy, r, col, a=1.0):
+    """Filled circle, optionally alpha-blended."""
+    r = int(r)
+    if r <= 0:
+        return
+    r2 = r * r
+    for dy in range(-r, r + 1):
+        y = cy + dy
+        if y < 0 or y >= H:
+            continue
+        dx = int((r2 - dy * dy) ** 0.5)
+        if a >= 1.0:
+            hspan(y, cx - dx, cx + dx, col[0], col[1], col[2])
+        else:
+            hspan_blend(y, cx - dx, cx + dx, col[0], col[1], col[2], a)
 
 
-def draw_background(cv):
+def soft_disc(cx, cy, r, col, peak=0.55):
+    """Glow disc: brightness falls off quadratically to the rim."""
+    r = int(r)
+    if r <= 0:
+        return
+    for dy in range(-r, r + 1):
+        y = cy + dy
+        if y < 0 or y >= H:
+            continue
+        for dx in range(-r, r + 1):
+            d2 = dx * dx + dy * dy
+            if d2 > r * r:
+                continue
+            t = 1.0 - d2 / (r * r)
+            add(cx + dx, y, col[0], col[1], col[2], peak * t * t)
+
+
+def ring(cx, cy, r, thick, col, a=1.0):
+    """Circle outline of given thickness."""
+    r = int(r)
+    if r <= 0:
+        return
+    for dy in range(-r - thick, r + thick + 1):
+        y = cy + dy
+        if y < 0 or y >= H:
+            continue
+        for dx in range(-r - thick, r + thick + 1):
+            d = (dx * dx + dy * dy) ** 0.5
+            if abs(d - r) <= thick * 0.5:
+                blend(cx + dx, y, col[0], col[1], col[2], a)
+
+
+def thick_line(x0, y0, x1, y1, w, col, a=1.0):
+    """Line drawn as a chain of discs."""
+    steps = int(max(abs(x1 - x0), abs(y1 - y0)) / max(1.0, w * 0.45)) + 2
+    for i in range(steps + 1):
+        t = i / steps
+        disc(int(x0 + (x1 - x0) * t), int(y0 + (y1 - y0) * t),
+             max(1, w // 2), col, a)
+
+
+def bezier(p0, p1, p2, p3, n=48):
+    """Cubic Bezier sample points."""
+    pts = []
+    for i in range(n + 1):
+        t = i / n
+        u = 1.0 - t
+        x = (u ** 3 * p0[0] + 3 * u * u * t * p1[0]
+             + 3 * u * t * t * p2[0] + t ** 3 * p3[0])
+        y = (u ** 3 * p0[1] + 3 * u * u * t * p1[1]
+             + 3 * u * t * t * p2[1] + t ** 3 * p3[1])
+        pts.append((x, y))
+    return pts
+
+
+def taper_stroke(pts, r0, r1, col, shade=None):
+    """Stroke a polyline with radius tapering r0 -> r1."""
+    n = len(pts)
+    for i, (x, y) in enumerate(pts):
+        t = i / (n - 1) if n > 1 else 0.0
+        r = r0 + (r1 - r0) * t
+        c = col
+        if shade is not None:
+            f = 1.0 - shade * t
+            c = (int(col[0] * f), int(col[1] * f), int(col[2] * f))
+        disc(int(x), int(y), max(1, int(r)), c)
+
+
+def ellipse(cx, cy, rx, ry, col, a=1.0):
+    """Filled ellipse."""
+    rx = int(rx)
+    ry = int(ry)
+    if rx <= 0 or ry <= 0:
+        return
+    for dy in range(-ry, ry + 1):
+        y = cy + dy
+        if y < 0 or y >= H:
+            continue
+        f = 1.0 - (dy * dy) / (ry * ry)
+        if f < 0:
+            continue
+        dx = int(rx * (f ** 0.5))
+        if a >= 1.0:
+            hspan(y, cx - dx, cx + dx, col[0], col[1], col[2])
+        else:
+            hspan_blend(y, cx - dx, cx + dx, col[0], col[1], col[2], a)
+
+
+def half_dome(cx, cy, rx, ry, col):
+    """Upper half of an ellipse (jellyfish bell)."""
+    rx = int(rx)
+    ry = int(ry)
+    for dy in range(-ry, 1):
+        y = cy + dy
+        if y < 0 or y >= H:
+            continue
+        f = 1.0 - (dy * dy) / (ry * ry)
+        if f < 0:
+            continue
+        dx = int(rx * (f ** 0.5))
+        hspan(y, cx - dx, cx + dx, col[0], col[1], col[2])
+
+
+def radial_glow(cx, cy, r, col, peak=0.5):
+    """Big soft additive glow, quadratic falloff."""
+    r = int(r)
+    if r <= 0:
+        return
+    step = 2
+    for dy in range(-r, r + 1, step):
+        y = cy + dy
+        if y < 0 or y >= H:
+            continue
+        for dx in range(-r, r + 1, step):
+            d2 = dx * dx + dy * dy
+            if d2 > r * r:
+                continue
+            t = 1.0 - d2 / (r * r)
+            add(cx + dx, y, col[0], col[1], col[2], peak * t * t)
+
+
+# ------------------------------------------------------------------- tiny font
+# 5x7 pixel glyphs, written out by hand ('#' = on). Only the letters the
+# title needs plus a few extras, so the text stays crisp and legible.
+
+GLYPHS = {
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+    "C": ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+    "G": ("01110", "10001", "10000", "10111", "10001", "10001", "01111"),
+    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "I": ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
+    "J": ("00111", "00010", "00010", "00010", "00010", "10010", "01100"),
+    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
+    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
+    "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "Q": ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+    "W": ("10001", "10001", "10001", "10101", "10101", "11011", "10001"),
+    "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+    "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+    "Z": ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
+    " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
+    "!": ("00100", "00100", "00100", "00100", "00100", "00000", "00100"),
+    ".": ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
+    "'": ("00100", "00100", "01000", "00000", "00000", "00000", "00000"),
+}
+
+
+def text_width(s, scale):
+    return len(s) * 6 * scale - scale
+
+
+def draw_text(s, cx, y, scale, col, glow=None):
+    """Draw centred text; glow (colour) first as a soft halo if given."""
+    w = text_width(s, scale)
+    x0 = cx - w // 2
+    for ci, ch in enumerate(s):
+        g = GLYPHS.get(ch.upper(), GLYPHS[" "])
+        gx = x0 + ci * 6 * scale
+        for row in range(7):
+            bits = g[row]
+            for b in range(5):
+                if bits[b] == "1":
+                    bx = gx + b * scale
+                    by = y + row * scale
+                    if glow is not None:
+                        for ox in range(-1, 2):
+                            for oy in range(-1, 2):
+                                disc(bx + scale // 2 + ox * scale,
+                                     by + scale // 2 + oy * scale,
+                                     scale, glow, 0.10)
+                    for dx in range(scale):
+                        for dy in range(scale):
+                            put(bx + dx, by + dy, col[0], col[1], col[2])
+
+
+# ---------------------------------------------------------------------- scene
+
+def background():
+    """Deep-sea gradient: teal-lit water above, abyss below, vignette."""
     for y in range(H):
         t = y / (H - 1)
-        if t < 0.55:
-            col = mix(DEEP_TOP, DEEP_MID, t / 0.55)
-        else:
-            col = mix(DEEP_MID, DEEP_BOT, (t - 0.55) / 0.45)
-        cv.span(y, 0, W - 1, col)
-    # soft violet glow behind the stage, centre of the canvas
-    cv.disc_glow(512, 560, 430, (96, 64, 168), peak=46)
-    cv.disc_glow(512, 560, 260, (140, 96, 210), peak=40)
+        r = int(6 + 4 * t)
+        g = int(34 + 26 * t - 14 * t * t)
+        b = int(78 + 34 * t - 40 * t * t)
+        fb[y * W * 3:(y + 1) * W * 3] = bytes((r, g, b)) * W
+    # warm glow from the stage floor, cool glow from the surface
+    radial_glow(512, 880, 420, (16, 90, 110), 0.55)
+    radial_glow(512, 60, 380, (30, 110, 150), 0.35)
+    # vignette: darken the corners
+    for yy in range(0, H, 3):
+        for xx in range(0, W, 3):
+            dx = (xx - W / 2) / (W / 2)
+            dy = (yy - H / 2) / (H / 2)
+            d = dx * dx + dy * dy
+            if d > 1.0:
+                a = min(0.5, (d - 1.0) * 0.55)
+                blend(xx, yy, 0, 2, 10, a)
 
 
-def draw_rays(cv):
-    # pale light shafts falling from the surface
-    top = (512, -60)
-    for k, (dx, spread, a) in enumerate(
-            [(-430, 90, 13), (-240, 70, 16), (-60, 60, 18),
-             (130, 70, 16), (330, 90, 13)]):
-        x = top[0] + dx
-        cv.poly([(x - spread, 0), (x + spread, 0),
-                 (x + spread + dx // 3, H), (x - spread + dx // 3, H)],
-                (150, 200, 255), a)
+def light_rays():
+    """Slanted shafts of surface light, brightest upper-left."""
+    for bx, top_w, alpha in ((180, 90, 0.10), (330, 60, 0.08),
+                             (620, 110, 0.09), (820, 70, 0.07)):
+        for s in range(0, 900, 4):
+            y = 40 + s
+            x = bx + int(s * 0.22)
+            w = top_w + int(s * 0.12)
+            for xx in range(x - w // 2, x + w // 2 + 1, 2):
+                fade = 1.0 - s / 950.0
+                blend(xx, y, 120, 210, 235, alpha * fade * 0.5)
 
 
-def draw_seabed(cv):
-    cv.ellipse(180, 1060, 330, 120, (6, 26, 40))
-    cv.ellipse(860, 1075, 360, 130, (5, 22, 36))
-    cv.ellipse(512, 1100, 420, 110, (4, 18, 30))
-    # a few glowing pebbles / coral dots on the floor
-    for (x, y, r, col) in [(140, 972, 7, CYAN), (205, 990, 5, GOLD),
-                           (880, 968, 7, (255, 130, 200)),
-                           (930, 992, 5, CYAN), (512, 995, 6, GOLD)]:
-        cv.disc_glow(x, y, r * 3, col, peak=70)
-        cv.circle(x, y, r, col)
+def bubble(x, y, r):
+    ring(x, y, r, 2, (170, 225, 245), 0.75)
+    disc(x - r // 3, y - r // 3, max(1, r // 4), (220, 245, 255), 0.9)
 
 
-def draw_arms(cv):
-    """Eight flowing arms; the right one rises to conduct with a baton."""
-    arms = [
-        # (start, control, end, width start->end, colour)
-        ((620, 690), (770, 600), (838, 428), (48, 18), PURPLE),
-        ((648, 728), (810, 758), (905, 700), (44, 16), PURPLE_LIGHT),
-        ((604, 756), (730, 862), (862, 902), (42, 14), PURPLE),
-        ((404, 690), (292, 596), (206, 468), (48, 18), PURPLE_LIGHT),
-        ((376, 728), (238, 756), (118, 700), (44, 16), PURPLE),
-        ((420, 756), (306, 862), (162, 902), (42, 14), PURPLE_LIGHT),
-        ((478, 748), (448, 852), (418, 952), (40, 14), PURPLE),
-        ((548, 748), (580, 852), (612, 952), (40, 14), PURPLE_LIGHT),
-    ]
-    for p0, p1, p2, wdt, col in arms:
-        cv.bezier(p0, p1, p2, wdt, col, steps=48)
-        # lighter ridge along the top of each arm
-        cv.bezier(p0, p1, p2, (wdt[0] * 0.45, wdt[1] * 0.45), LAVENDER,
-                  a=70, steps=48)
-    # suckers: pale dots trailing along the two front arms
-    for p0, p1, p2 in (arms[6][:3], arms[7][:3]):
-        for k in range(1, 8):
-            t = k / 8.0
-            x, y = cv.bezier_point(p0, p1, p2, t)
-            cv.circle(int(x), int(y), 7, LAVENDER, a=150)
-    # the conducting baton: gold, held at the tip of the raised arm
-    cv.stroke([(838, 428), (908, 332)], 9, GOLD)
-    cv.disc_glow(908, 332, 60, GOLD, peak=90)
-    cv.circle(908, 332, 12, GOLD_LIGHT)
-    # four-point sparkle star at the baton tip
-    cv.poly([(908, 300), (916, 324), (940, 332), (916, 340),
-             (908, 364), (900, 340), (876, 332), (900, 324)],
-            GOLD_LIGHT)
-
-
-def draw_jelly(cv, cx, cy, r, dome, glow, tent):
-    """One glowing jellyfish: dome, scalloped rim, wavy tentacles."""
-    cv.disc_glow(cx, cy, int(r * 1.7), glow, peak=55)
-    # dome
-    cv.ellipse(cx, cy, r, int(r * 0.78), dome)
-    cv.ellipse(cx - r // 5, cy - r // 4, int(r * 0.62), int(r * 0.42),
-               (255, 255, 255), a=70)
-    cv.ellipse(cx - r // 3, cy - r // 3, int(r * 0.3), int(r * 0.18),
-               (255, 255, 255), a=110)
-    # scalloped lower rim
-    for k in range(-2, 3):
-        sx = cx + k * r // 2
-        sy = cy + int(r * 0.62)
-        cv.circle(sx, sy, r // 5, dome)
-    # bright rim along the dome top
-    for s in range(13):
-        t = math.pi * s / 12
-        x = cx + int(r * 0.96 * math.cos(math.pi + t))
-        y = cy - int(r * 0.74 * math.sin(t))
-        cv.circle(x, y, 4, (255, 255, 255), a=150)
-    # two glowing spots inside the dome
-    cv.circle(cx - r // 3, cy + r // 8, r // 8, (255, 255, 255), a=120)
-    cv.circle(cx + r // 4, cy + r // 5, r // 10, (255, 255, 255), a=120)
-    # tentacles: sine-wave strokes hanging from the rim
-    for k in range(-2, 3):
-        x0 = cx + k * r // 2
-        y0 = cy + int(r * 0.68)
-        length = int(r * (1.5 + 0.18 * abs(k)))
-        pts = []
-        for s in range(17):
-            t = s / 16
-            pts.append((x0 + int(9 * math.sin(t * 5.2 + k * 1.7)),
-                        y0 + int(length * t)))
-        cv.stroke(pts, 5, tent, a=210)
-
-
-def draw_jellies(cv):
-    # the orchestra, arched above the conductor
-    draw_jelly(cv, 252, 330, 76, (255, 120, 200), (255, 90, 180), (255, 170, 220))
-    draw_jelly(cv, 392, 238, 64, (90, 220, 255), (60, 190, 255), (150, 235, 255))
-    draw_jelly(cv, 545, 205, 70, (255, 200, 90), (255, 180, 60), (255, 225, 150))
-    draw_jelly(cv, 688, 242, 64, (180, 120, 255), (150, 90, 255), (205, 165, 255))
-    draw_jelly(cv, 822, 332, 76, (120, 255, 200), (80, 240, 170), (170, 255, 215))
-    # two small ones flanking the stage
-    draw_jelly(cv, 138, 500, 52, (255, 150, 120), (255, 120, 90), (255, 190, 160))
-    draw_jelly(cv, 890, 498, 52, (120, 200, 255), (90, 170, 255), (160, 215, 255))
-
-
-def draw_note(cv, x, y, s, col, tilt=0):
+def music_note(x, y, s, col, tilt=0.0):
     """A quaver: filled head, stem, flag."""
-    cv.ellipse(x, y, int(8 * s), int(6 * s), col)
-    # stem: a short vertical bar rising from the head
-    sx = x + int(7 * s)
-    for yy in range(y - int(28 * s), y + 1):
-        cv.span(yy, sx, sx + max(1, int(2.5 * s)), col)
-    cv.poly([(sx, y - int(28 * s)),
-             (sx + int(14 * s), y - int(20 * s)),
-             (sx, y - int(12 * s))], col)
-    cv.circle(x, y, int(3 * s), (255, 255, 255), a=160)
+    ellipse(x, y, int(7 * s), int(5 * s), col)
+    thick_line(x + int(6 * s), y, x + int(6 * s), y - int(22 * s),
+               max(2, int(2.5 * s)), col)
+    pts = bezier((x + int(6 * s), y - int(22 * s)),
+                 (x + int(16 * s), y - int(20 * s)),
+                 (x + int(18 * s), y - int(10 * s)),
+                 (x + int(12 * s), y - int(4 * s)), 12)
+    taper_stroke(pts, 3 * s, 1.5 * s, col)
 
 
-def draw_music(cv):
-    # the music itself, spiralling up from the baton toward the surface:
-    # a trail of glowing dots that tightens as it rises
-    for k in range(46):
-        t = k / 45.0
-        ang = 1.1 + t * 5.4
-        rad = 30 + 250 * (1 - t) * 0.9
-        x = int(880 - rad * math.cos(ang) * 0.55 - t * 60)
-        y = int(360 - t * 250 + 40 * math.sin(ang))
-        r = max(2, int(9 - 6 * t))
-        col = GOLD if k % 3 else CYAN
-        cv.disc_glow(x, y, r * 4, col, peak=70)
-        cv.circle(x, y, r, col)
-    # floating quavers along the spiral and around the jellies
-    for (x, y, s, col) in [(700, 470, 1.5, GOLD), (770, 400, 1.2, CYAN),
-                           (836, 330, 1.4, GOLD_LIGHT), (300, 470, 1.3, CYAN),
-                           (180, 620, 1.1, GOLD), (850, 600, 1.2, GOLD),
-                           (620, 330, 1.0, CYAN), (430, 330, 1.0, GOLD)]:
-        draw_note(cv, x, y, s, col)
+def jellyfish(cx, cy, size, bell, glow_col, tent_col, phase):
+    """One glowing jellyfish: dome bell, scalloped rim, wavy tentacles."""
+    soft_disc(cx, cy, int(size * 1.7), glow_col, 0.30)
+    # bell: dome + inner dome for depth
+    half_dome(cx, cy, int(size), int(size * 0.82), bell)
+    half_dome(cx, cy - int(size * 0.12), int(size * 0.62),
+              int(size * 0.5), (255, 255, 255))
+    # scalloped rim
+    for k in range(5):
+        t = -0.8 + k * 0.4
+        sx = cx + int(t * size * 0.9)
+        disc(sx, cy + int(size * 0.06), int(size * 0.16), bell)
+    # oral arms + tentacles: sine waves falling away
+    import math
+    for k in range(5):
+        tx = cx + int((k - 2) * size * 0.34)
+        length = size * (1.5 + 0.35 * ((k * 7 + phase) % 3))
+        pts = []
+        steps = 26
+        for i in range(steps + 1):
+            t = i / steps
+            sway = math.sin(t * 5.0 + phase + k * 1.3) * size * 0.16 * t
+            pts.append((tx + sway, cy + t * length))
+        taper_stroke(pts, max(2, size * 0.07), 1.5, tent_col)
 
 
-def draw_bubbles(cv):
-    for i in range(30):
-        x = int(50 + (i * 137.5) % 924)
-        y = int(920 - (i * 61.7) % 760)
-        r = 4 + (i * 7) % 13
-        cv.circle(x, y, r, (170, 220, 255), a=55)
-        cv.circle(x - r // 3, y - r // 3, max(1, r // 4), (255, 255, 255), a=170)
+def octopus():
+    """The conductor: big purple dome, two bright eyes, eight sweeping
+    arms, one raised arm holding a glowing baton."""
+    import math
+    cx, cy = 512, 545
+    # halo behind the head
+    radial_glow(cx, cy - 40, 330, (120, 60, 190), 0.42)
+    # arms first (behind the head): four each side, sweeping down and out
+    arm_defs = [
+        # (control points, base radius)
+        ((cx - 90, cy + 60), (cx - 260, cy + 210), (cx - 430, cy + 330),
+         (cx - 470, cy + 560), 30),
+        ((cx - 60, cy + 90), (cx - 170, cy + 260), (cx - 300, cy + 430),
+         (cx - 330, cy + 640), 28),
+        ((cx - 25, cy + 105), (cx - 60, cy + 300), (cx - 110, cy + 480),
+         (cx - 120, cy + 690), 26),
+        ((cx + 20, cy + 110), (cx + 30, cy + 300), (cx + 40, cy + 500),
+         (cx + 30, cy + 700), 26),
+        ((cx + 60, cy + 100), (cx + 130, cy + 280), (cx + 210, cy + 460),
+         (cx + 250, cy + 660), 27),
+        ((cx + 95, cy + 70), (cx + 230, cy + 220), (cx + 360, cy + 340),
+         (cx + 430, cy + 520), 29),
+    ]
+    purple = (122, 62, 196)
+    purple_dark = (74, 32, 128)
+    for p0, p1, p2, p3, r0 in arm_defs:
+        pts = bezier(p0, p1, p2, p3, 56)
+        taper_stroke(pts, r0, 6, purple, shade=0.35)
+        # suction cups along the inner side
+        for i in range(6, len(pts), 7):
+            x, y = pts[i]
+            disc(int(x), int(y), 5, (196, 150, 235), 0.85)
+    # head: big dome with a lighter crown
+    half_dome(cx, cy + 40, 205, 195, purple)
+    half_dome(cx, cy + 28, 165, 150, (146, 84, 214))
+    ellipse(cx, cy + 30, 205, 60, purple)
+    # crown highlight
+    ellipse(cx - 55, cy - 95, 95, 42, (168, 110, 228), 0.55)
+    # eyes: wide, bright, looking up-right toward the baton
+    for ex in (cx - 78, cx + 78):
+        ellipse(ex, cy - 30, 42, 50, (245, 250, 255))
+        disc(ex + 10, cy - 26, 20, (16, 8, 34))
+        disc(ex + 4, cy - 36, 8, (255, 255, 255))
+    # blush + smile
+    ellipse(cx - 128, cy + 28, 22, 12, (216, 110, 190), 0.6)
+    ellipse(cx + 128, cy + 28, 22, 12, (216, 110, 190), 0.6)
+    # raised conducting arm, curving up-right with the baton
+    pts = bezier((cx + 130, cy - 60), (cx + 260, cy - 150),
+                 (cx + 330, cy - 260), (cx + 350, cy - 380), 40)
+    taper_stroke(pts, 26, 7, purple, shade=0.25)
+    for i in range(5, len(pts), 8):
+        x, y = pts[i]
+        disc(int(x), int(y), 5, (196, 150, 235), 0.85)
+    # baton: gold wand with a starburst tip, held at the raised arm's tip
+    bx, by = cx + 350, cy - 380
+    thick_line(bx, by, bx + 90, by - 110, 5, (255, 214, 110))
+    soft_disc(bx + 90, by - 110, 46, (255, 220, 120), 0.8)
+    disc(bx + 90, by - 110, 9, (255, 246, 200))
+    for ang in range(0, 360, 45):
+        a = math.radians(ang)
+        thick_line(bx + 90, by - 110,
+                   bx + 90 + int(26 * math.cos(a)),
+                   by - 110 + int(26 * math.sin(a)), 3, (255, 230, 150), 0.9)
 
 
-def draw_fish(cv, x, y, s, col):
-    """A tiny silhouetted fish, part of the audience below."""
-    cv.ellipse(x, y, int(22 * s), int(10 * s), col)
-    cv.poly([(x - int(20 * s), y), (x - int(34 * s), y - int(11 * s)),
-             (x - int(34 * s), y + int(11 * s))], col)
-    cv.circle(x + int(10 * s), y - 2, max(1, int(2.5 * s)), (200, 230, 255))
+def seafloor():
+    """Dark rocks, glowing anemones and coral at the bottom."""
+    import math
+    for y in range(930, H):
+        t = (y - 930) / 94.0
+        r = int(10 - 8 * t)
+        g = int(22 - 16 * t)
+        b = int(40 - 26 * t)
+        fb[y * W * 3:(y + 1) * W * 3] = bytes((r, g, b)) * W
+    # rock humps
+    for cx, rx, ry in ((140, 170, 46), (430, 210, 58), (760, 230, 52),
+                       (960, 150, 40)):
+        ellipse(cx, 968, rx, ry, (14, 26, 48))
+        ellipse(cx - 30, 952, rx // 2, ry // 2, (22, 38, 66), 0.8)
+    # glowing anemone tufts
+    for cx, col in ((120, (255, 120, 170)), (330, (90, 230, 220)),
+                    (700, (255, 190, 90)), (900, (170, 140, 255))):
+        for k in range(7):
+            ang = math.pi * (0.15 + 0.7 * k / 6.0)
+            ex = cx + int(26 * math.cos(math.pi - ang))
+            ey = 940 - int(34 * math.sin(ang))
+            thick_line(cx, 945, ex, ey, 4, col, 0.9)
+            disc(ex, ey, 4, (255, 255, 255), 0.9)
+        soft_disc(cx, 930, 34, col, 0.35)
 
 
-def draw_title(cv):
-    title = "THE CONDUCTOR OF THE DEEP"
-    sub = "THE ABYSS PLAYS TONIGHT"
-    scale = 4
-    tw = text_width(title, scale)
-    tx = (W - tw) // 2
-    # dark halo so the gold reads over the rays
-    draw_text(cv, title, tx + 3, 51, scale, (8, 10, 40))
-    draw_text(cv, title, tx, 48, scale, GOLD)
-    draw_text(cv, title, tx, 48, scale, GOLD_LIGHT, a=60)
-    sw = text_width(sub, 2)
-    draw_text(cv, sub, (W - sw) // 2, 102, 2, CYAN)
-
-
-def draw_octopus_head(cv):
-    cx, cy = 512, 585
-    # head dome, layered for a soft shaded look
-    cv.ellipse(cx, cy, 208, 178, PURPLE_DARK)
-    cv.ellipse(cx - 8, cy - 12, 192, 162, PURPLE)
-    cv.ellipse(cx - 26, cy - 38, 150, 118, PURPLE_LIGHT, a=150)
-    cv.ellipse(cx - 70, cy - 78, 62, 40, LAVENDER, a=110)
-    # belly patch where the arms meet the head
-    cv.ellipse(cx, cy + 118, 128, 62, LAVENDER, a=120)
-    # blush
-    cv.circle(392, 648, 26, (255, 130, 190), a=80)
-    cv.circle(632, 648, 26, (255, 130, 190), a=80)
-    # eyes: big, looking up toward the baton
-    for ex in (438, 586):
-        cv.ellipse(ex, 556, 50, 60, (242, 248, 255))
-        cv.ellipse(ex + 12, 544, 21, 29, (18, 10, 42))
-        cv.circle(ex + 4, 532, 9, (255, 255, 255))
-        cv.circle(ex + 18, 560, 4, (255, 255, 255), a=200)
-    # happy raised brows
-    cv.bezier((398, 478), (430, 452), (468, 472), (10, 10), PURPLE_DARK)
-    cv.bezier((556, 472), (594, 452), (626, 478), (10, 10), PURPLE_DARK)
-    # wide joyful smile
-    pts = []
-    for s in range(21):
-        t = s / 20
-        x = 448 + 128 * t
-        y = 640 + 34 * math.sin(math.pi * t) * 0.9
-        pts.append((x, y))
-    cv.stroke(pts, 11, (52, 18, 88))
-    cv.circle(448, 640, 7, (52, 18, 88))
-    cv.circle(576, 640, 7, (52, 18, 88))
-
-
-def draw_scene(cv):
-    draw_background(cv)
-    draw_rays(cv)
-    draw_seabed(cv)
-    draw_arms(cv)
-    draw_octopus_head(cv)
-    draw_jellies(cv)
-    draw_music(cv)
-    draw_bubbles(cv)
-    for (fx, fy, fs, fc) in [(120, 935, 1.0, (30, 66, 104)),
-                             (205, 962, 0.8, (26, 58, 94)),
-                             (905, 940, 1.1, (30, 66, 104)),
-                             (820, 965, 0.7, (26, 58, 94))]:
-        draw_fish(cv, fx, fy, fs, fc)
-    draw_title(cv)
-
+# ---------------------------------------------------------------------- compose
 
 def main():
-    cv = Canvas(W, H)
-    draw_scene(cv)
-    write_png(OUT, cv)
+    background()
+    light_rays()
+
+    # title, high in clear water, glowing cyan-white
+    draw_text("THE CONDUCTOR", 512, 52, 5, (235, 250, 255),
+              glow=(60, 190, 230))
+    draw_text("OF THE DEEP", 512, 104, 5, (170, 225, 250),
+              glow=(60, 190, 230))
+
+    # jellyfish orchestra: an arc of glowing players below the conductor
+    players = [
+        (150, 700, 52, (90, 220, 235), (0, 200, 220), (110, 235, 245), 0.0),
+        (300, 790, 60, (255, 130, 190), (235, 60, 140), (255, 150, 200), 1.1),
+        (512, 830, 66, (255, 205, 90), (230, 160, 40), (255, 220, 130), 2.2),
+        (720, 790, 58, (150, 120, 255), (120, 80, 235), (180, 150, 255), 3.0),
+        (880, 700, 50, (90, 235, 170), (20, 200, 140), (120, 245, 190), 4.1),
+    ]
+    for cx, cy, size, bell, glowc, tent, ph in players:
+        jellyfish(cx, cy, size, bell, glowc, tent, ph)
+
+    octopus()
+
+    # rising music notes, gold and cyan, drifting up from the orchestra
+    notes = [
+        (250, 560, 1.0, (255, 214, 110)), (700, 520, 1.1, (140, 230, 245)),
+        (820, 430, 0.9, (255, 214, 110)), (180, 430, 0.85, (140, 230, 245)),
+        (610, 340, 1.0, (255, 214, 110)), (420, 300, 0.8, (140, 230, 245)),
+        (880, 600, 0.9, (255, 190, 140)), (120, 600, 0.8, (255, 190, 140)),
+    ]
+    for x, y, s, col in notes:
+        soft_disc(x, y - 8, int(26 * s), col, 0.35)
+        music_note(x, y, s, col)
+
+    # bubbles rising in loose streams
+    for bx, by, n in ((200, 900, 6), (830, 880, 6), (512, 950, 5),
+                      (60, 820, 4), (970, 800, 4)):
+        for k in range(n):
+            r = int(rr(4, 11))
+            x = int(bx + rr(-26, 26) + k * 4)
+            y = int(by - k * 62 - rr(0, 30))
+            bubble(x, y, r)
+
+    # drifting plankton motes for depth
+    for _ in range(320):
+        x = int(rr(0, W))
+        y = int(rr(0, H))
+        c = rr(0, 1)
+        if c < 0.5:
+            put(x, y, 150, 210, 235)
+        else:
+            put(x, y, 200, 180, 255)
+
+    os.makedirs("/output", exist_ok=True)
+    n = write_png("/output/entry.png")
+    print("wrote /output/entry.png", n, "bytes")
 
 
 if __name__ == "__main__":
