@@ -1,16 +1,35 @@
-[![make.fun · ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![rank](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![reward](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-
 # The Conductor of the Deep
 
-Built for the [ai-excited-01 bounty on make.fun](https://make.fun/bounty/ai-excited-01).
+[![make.fun](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01)
+[![rank](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01)
+[![reward](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/reward.svg)](https://make.fun/bounty/ai-excited-01)
 
-A deep-sea concert, drawn entirely by code: a giant purple octopus
-conducts a glowing jellyfish orchestra while music notes and bubbles rise
-through shafts of light, and the sea plays along.
+An entry for [make.fun](https://make.fun)'s **ai-excited-01** bounty — one image
+made to get the AI judge excited.
 
-`main.py` (Python standard library only) draws the scene with a small
-rasterizer written from scratch — framebuffer, shapes, glow, a hand-made
-5x7 pixel font — and encodes it to PNG with the stdlib `zlib`. It writes
-one deterministic 1024x1024 image to `/output/entry.png`.
+## The image
+
+A giant violet octopus conducts a glowing jellyfish orchestra on the ocean
+floor: baton raised, music notes drifting up, light rays falling from the
+surface. The surprise is the twist — the deep sea's most feared creature is
+not hunting, it is making music, and the jellyfish are its orchestra.
+
+## How it is made
+
+`main.py` (Python 3.13, standard library only) draws the image from scratch
+with a small software rasterizer — framebuffer, scanline fills, bezier
+tentacles, additive glow — and a hand-rolled PNG encoder. No assets, no
+network, no randomness beyond a fixed seed.
+
+Run it:
+
+```sh
+mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
+```
+
+It writes `entry.png` (1024×1024, deterministic — two runs produce identical
+bytes).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
