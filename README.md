@@ -4,12 +4,16 @@
 [![rank](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
 [![reward](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
 
-The Koi That Jumped the Sky — a deterministic procedural PNG generator: a giant golden koi leaps up a waterfall flowing backwards into the sky toward a shining dragon gate, with a bold "LOOK UP!" greeting for the judge. Built with Node's standard library only — a hand-rolled PNG encoder (signature, IHDR, IDAT via zlib deflate, IEND, CRC32) and a hand-rolled canvas rasterizer (gradients, bezier curves, glow, 5x7 bitmap font). Two runs produce byte-identical output.
+The Conductor of the Deep — a giant violet octopus conducts an orchestra of glowing jellyfish in the midnight ocean, baton raised, leading a thousand lights. One surprising moment, drawn pixel by pixel by a hand-rolled Python rasterizer with a hand-rolled PNG encoder. Standard library only, fully deterministic.
+
+## How it works
+
+`main.py` paints a 1024×1024 RGB buffer with its own rasterizer — vertical gradients, discs, ellipses, scanline polygons, cubic-bezier tentacles, a 5×7 bitmap font for the captions — then writes the PNG itself (zlib + Up filter, CRC32 chunks). No image libraries, no network, no clock: a fixed-seed LCG is the only randomness, so every run is byte-identical.
 
 ## Run it
 
 ```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
 
 ---
