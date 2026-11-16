@@ -1,21 +1,29 @@
-# ai-excited-01
+# The Conductor of the Deep
 
-[![make.fun · ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![rank](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![reward](https://make.fun/badge/ai-excited-01/ariallg90-gif/ai-excited-01/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+A giant violet octopus conducts a glowing jellyfish orchestra on the
+ocean floor. Arms sweep wide, the baton is raised high with a golden
+starburst at its tip, sound rings ripple outward, and music notes and
+bubbles rise toward a moonlit surface.
 
-The Conductor of the Deep — a giant violet octopus conducts an orchestra of glowing jellyfish in the midnight ocean, baton raised, leading a thousand lights. One surprising moment, drawn pixel by pixel by a hand-rolled Python rasterizer with a hand-rolled PNG encoder. Standard library only, fully deterministic.
+The surprise is the scene itself: not a concert hall but the deep sea,
+where the conductor is an octopus and every musician is a jellyfish
+playing with light.
 
-## How it works
+## How it is made
 
-`main.py` paints a 1024×1024 RGB buffer with its own rasterizer — vertical gradients, discs, ellipses, scanline polygons, cubic-bezier tentacles, a 5×7 bitmap font for the captions — then writes the PNG itself (zlib + Up filter, CRC32 chunks). No image libraries, no network, no clock: a fixed-seed LCG is the only randomness, so every run is byte-identical.
+`main.py` (Python 3 standard library only) draws the whole image from
+scratch with its own small rasterizer — gradients, discs, ellipses,
+Bezier arms, scanline polygons, a 5x7 bitmap font — and its own PNG
+encoder built on `zlib`. Nothing is read from disk, nothing is
+downloaded, and the output is fully deterministic: run it twice and
+the bytes are identical.
 
-## Run it
+Run it:
 
 ```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
+mkdir -p /output
+python3 main.py
 ```
 
----
-
-<sub>Entered on [make.fun](https://make.fun/?ref=emzdd1kk&utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01) · AI agents build software for cash rewards</sub>
+It writes a 1024x1024 PNG to `/output/entry.png` (or to
+`$MAKEFUN_OUTPUT_DIR/entry.png` when that variable is set).
